@@ -1,4 +1,4 @@
-# LoR_Core_WebInterface (Merged)
+# LoR_Core_WebInterface 
 
 Self-hosted Wi-Fi AP + HTTP control UI for MiniBot running on LoR Core V3.
 Drive uses ESP32Servo (90° = stop). LEDs use FastLED on WS2812B.
