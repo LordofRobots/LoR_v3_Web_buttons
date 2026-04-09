@@ -1283,7 +1283,10 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
     if(heapGraph.canvas)   fitCanvasToCss(heapGraph.canvas);
   });
 
-  let ws;
+   let ws = null;
+  let reconnectTimer = null;
+  let lastWsRxMs = 0;
+
   const wsDot   = document.getElementById("wsDot");
   const wsPill  = document.getElementById("wsPill");
   const wsState = document.getElementById("wsState");
@@ -1291,6 +1294,9 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
   let lastTelMs = 0;
   let lagEmaMs = null;
   const LAG_EMA_ALPHA = 0.20;
+
+  const WS_RECONNECT_DELAY_MS = 400;
+  const WS_STALE_MS = 2000;
 
   function setWsUI(connected){
     wsDot.style.background = connected ? getVar('--good') : getVar('--bad');
@@ -1305,15 +1311,63 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
     }
   }
 
-  function wsConnect(){
+  function clearReconnectTimer(){
+    if(reconnectTimer){
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+  }
+
+  function scheduleReconnect(delay = WS_RECONNECT_DELAY_MS){
+    clearReconnectTimer();
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      ensureWsConnected();
+    }, delay);
+  }
+
+  function closeWs(){
+    if(!ws) return;
+    try{
+      ws.onopen = null;
+      ws.onclose = null;
+      ws.onerror = null;
+      ws.onmessage = null;
+      ws.close();
+    }catch(e){}
+    ws = null;
+    setWsUI(false);
+  }
+
+  function connectWs(){
+    clearReconnectTimer();
+    closeWs();
+
     setWsUI(false);
     ws = new WebSocket(`ws://${location.host}/ws`);
 
-    ws.onopen  = () => setWsUI(true);
-    ws.onclose = () => { setWsUI(false); setTimeout(wsConnect, 400); };
-    ws.onerror = () => { setWsUI(false); };
+    ws.onopen = () => {
+      setWsUI(true);
+      lastWsRxMs = performance.now();
+      lastTelMs = 0;
+      lagEmaMs = null;
+      wsSend({type:"joy", x:0, y:0});
+    };
+
+    ws.onclose = () => {
+      setWsUI(false);
+      ws = null;
+      scheduleReconnect();
+    };
+
+    ws.onerror = () => {
+      setWsUI(false);
+      try { ws && ws.close(); } catch(e){}
+    };
 
     ws.onmessage = (e) => {
+      lastWsRxMs = performance.now();
+
       try{
         const m = JSON.parse(e.data);
         if(m.type !== "tel") return;
@@ -1442,11 +1496,50 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
           const rst   = (m.reset ?? "--");
           document.getElementById("sys").textContent = `${cpu}/${flash}/${rst}`;
         } catch(err){ console.error("sys update failed", err); }
-      }catch(err){}
+      } catch(err) {
+        console.error("ws message failed", err);
+      }
     };
   }
 
-  wsConnect();
+  function ensureWsConnected(force = false){
+    const hidden = document.visibilityState !== "visible";
+    if(hidden && !force) return;
+
+    const isOpen = ws && ws.readyState === WebSocket.OPEN;
+    const stale =
+      isOpen &&
+      lastWsRxMs > 0 &&
+      (performance.now() - lastWsRxMs) > WS_STALE_MS;
+
+    const needsConnect =
+      !ws ||
+      ws.readyState === WebSocket.CLOSED ||
+      ws.readyState === WebSocket.CLOSING ||
+      stale;
+
+    if(needsConnect || (force && !isOpen)){
+      connectWs();
+    }
+  }
+
+  document.addEventListener("visibilitychange", () => {
+    if(document.visibilityState === "visible"){
+      ensureWsConnected(true);
+    }
+  });
+
+  window.addEventListener("pageshow", () => ensureWsConnected(true));
+  window.addEventListener("focus", () => ensureWsConnected(true));
+  window.addEventListener("online", () => ensureWsConnected(true));
+
+  setInterval(() => {
+    if(document.visibilityState === "visible"){
+      ensureWsConnected(false);
+    }
+  }, 1000);
+
+  connectWs();
 
   document.getElementById("btnA").addEventListener("pointerdown", ()=>wsSend({type:"fn", id:"A"}));
   document.getElementById("btnB").addEventListener("pointerdown", ()=>wsSend({type:"fn", id:"B"}));

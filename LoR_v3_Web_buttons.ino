@@ -119,7 +119,7 @@ static const char *FW_VERSION = "LoR Core V3 Web Interface FW - APRIL 2026";
 // ------------------------------
 // Wi-Fi AP config (static 10.0.0.1)
 // ------------------------------
-static const char *AP_SSID = "Minibot Web Interface DB";  // CHANGE TO YOUR NAME OF CHOICE
+static const char *AP_SSID = "Minibot v3 Web Interface";  // CHANGE TO YOUR NAME OF CHOICE
 static const char *AP_PASS = "password";
 
 IPAddress AP_IP(10, 0, 0, 1);
@@ -184,6 +184,7 @@ static bool g_dbgInputsDirty = true;
 Servo MotorOutput[13];
 
 enum MotorType {
+  NFG,
   MG90_CR,
   MG90_Degree,
   N20Plus,
@@ -201,6 +202,7 @@ struct MotorTypeConfig {
 };
 
 MotorTypeConfig motorTypeConfigs[] = {
+  { NFG, 50, 500, 2500 },
   { MG90_CR, 50, 500, 2500 },
   { MG90_Degree, 50, 500, 2500 },
   { N20Plus, 50, 1000, 2000 },
@@ -341,7 +343,7 @@ void serviceLed_() {
 
   switch (desired) {
     case LEDM_BOOT: LED_SetSolid_(0, 0, 255); break;
-    case LEDM_DISCONNECTED: break;  // handled above
+    case LEDM_DISCONNECTED: break;
     case LEDM_IDLE: LED_SetSolid_(255, 0, 0); break;
     case LEDM_COMMAND: LED_SetSolid_(0, 255, 0); break;
     case LEDM_FUNCTION: LED_SetSolid_(0, 255, 255); break;
@@ -409,8 +411,15 @@ void DriveFromJoystick(float x, float y) {
 
 void serviceDriveFromLatestJoy_() {
   const uint32_t now = millis();
-  const float x = g_joyX;
-  const float y = g_joyY;
+  const float x = -g_joyX; //inverted if MG90_CR
+  const float y = -g_joyY; //inverted if MG90_CR
+
+  // PRIORITY: if no WebSocket clients are attached, show disconnected pattern
+  if (ws.count() == 0) {
+    Motor_STOP();
+    LED_Ready();
+    return;
+  }
 
   if (g_lastCmdMs == 0 || (now - g_lastCmdMs) > JOY_RX_TIMEOUT_MS) {
     Motor_STOP();
