@@ -6,6 +6,14 @@ This project turns a LoR Core V3 into a self-hosted robot control system with a 
 
 The ESP32 creates its own Wi-Fi network, hosts a web page, and communicates with that page over WebSocket for low-latency control. The interface provides a virtual joystick, four function buttons, and live telemetry so the robot can be driven from a phone, tablet, or computer without installing an app.
 
+![shared image](https://github.com/user-attachments/assets/7931de68-f467-4f1c-a51e-371bb26e73d8)
+
+![shared image (1)](https://github.com/user-attachments/assets/dc25ae7c-d5e0-4230-a659-3268b49c197b)
+
+![shared image (2)](https://github.com/user-attachments/assets/32459e3b-1849-464d-825d-4a4756543ef7)
+
+![shared image (3)](https://github.com/user-attachments/assets/1a7c693a-d3f2-482c-b158-56194946af73)
+
 ---
 
 ## Environment Setup
