@@ -109,3 +109,6 @@ Chrome recommended.
 - No internet required
 - Fixed IP: 10.0.0.1
 - Works on any modern browser
+
+## Known Bugs
+- MG90_CR and N20_Plus rotate opposite from each other. some adapting is required for your specific setup.
