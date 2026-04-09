@@ -1,134 +1,228 @@
+/* UPDATED: APRIL 08 2026
+================================================================================
+  LORD of ROBOTS — LoR_Core_WebInterface (AsyncWebServer + WebSocket)
+  Purpose: Self-hosted Wi-Fi AP + WebSocket joystick control + telemetry stream
+  Target:  LoR Core V3 (ESP32)
+
+  REQUIRED LIBRARIES
+  ------------------------------------------------------------------------------
+  Install these in Arduino IDE before compiling:
+
+    - "Async TCP" by ESP32Async
+    - "ESP Async Webserver" by ESP32Async
+    - "ESP32Servo" by Kevin Harrington, John K. Bennett
+    - "FastLED" by Daniel Garcia
+
+  REQUIRED BOARD PACKAGE
+  ------------------------------------------------------------------------------
+  In Arduino IDE:
+    File → Preferences → Additional Boards Manager URLs
+    Add:
+      https://dl.espressif.com/dl/package_esp32_index.json
+
+  Then:
+    Tools → Board → Boards Manager
+    Install:
+      "esp32" by Espressif Systems
+  
+  UI
+  ------------------------------------------------------------------------------
+    - SSID: "Minibot Web Interface" or change to as you see fit
+    - IP:   10.0.0.1 (static)
+    - AsyncWebServer + WebSocket (/ws) (libraries by ESP32Async)
+    - Joystick (x,y normalized [-1..1]) drives tank mix
+    - Buttons A/B/C/D send function events
+    - Telemetry pushed periodically:
+        vin, vin_raw, rssi_dbm, lag estimate handled client-side,
+        active-low buttons A/B/C/D + switch (external pullups),
+        uptime, cmd_age, stations, heap, system info.
+
+  SYSTEM OVERVIEW
+  ------------------------------------------------------------------------------
+  This firmware creates a standalone robot control system using:
+
+    1. ESP32 in Access Point mode
+    2. Browser-hosted control UI
+    3. WebSocket-based real-time command + telemetry link
+    4. Servo-style output control for motors / actuators
+    5. LED state feedback
+    6. Telemetry and fail-safe stopping logic
+
+================================================================================
 /*
 ================================================================================
-  LORD of ROBOTS — LoR_Core_WebInterface (Merged)
-  Purpose: Self-hosted Wi-Fi AP + HTTP control UI for MiniBot (Servo drive + LEDs)
-  Version: AUG 27, 2025  |  File: LoR_Core_WebInterface.ino
-================================================================================
+  LORD of ROBOTS — LoR_Core_WebInterface (AsyncWebServer + WebSocket)
+  Purpose: Self-hosted Wi-Fi AP + WebSocket joystick control + telemetry stream
+  Target:  LoR Core V3 (ESP32)
 
-SETUP / CONNECTION
-• Power the LoR Core V3. The ESP32 starts a Wi-Fi Access Point:
-    SSID: "MiniBot_v3"        (change in `ssid`)
-    PASS: "password"          (change in `password`, ≥8 chars)
-    IP:   10.0.0.1            (static; set in `WifiSetup`)
-• Optional mDNS: "robot.local" (depends on client OS resolver)
-• Connect your phone/PC to the AP, then open:
-    http://10.0.0.1           → Control web UI
+  REQUIRED LIBRARIES
+  ------------------------------------------------------------------------------
+  Install these in Arduino IDE before compiling:
 
-WEB UI / USER CONTROLS
-• Drive pad: Forward, Left, Right, Back, Stop.
-• Speed toggle: Low / High. Default = Low. Affects drive output percentage.
-• Hotkeys (desktop):
-    Arrow keys or WASD → Drive
-    L/H                → Low/High speed
-    1/2/3/4 or Numpad 1/2/3/4 → A/B/C/D function buttons
-• Function buttons: A..D placeholders call functionA()..functionD() (stub hooks).
+    - "Async TCP" Version 3.4.10 by ESP32Async
+    - "ESP Async Webserver" Version 3.10.3 by ESP32Async
+    - "ESP32Servo" Version 3.0.7 by Kevin Harrington, John K. Bennett
+    - "FastLED" Version 3.10.3 by Daniel Garcia
 
-FIRMWARE ARCHITECTURE
-• Networking: Wi-Fi AP with fixed IP + HTTP server (ESP-IDF httpd).
-• Routes:
-    GET "/"               → serves the HTML UI
-    GET "/action?go=CMD"  → executes command (forward/left/right/back/stop/high/low/A..D)
-• LEDs: FastLED on WS2812B, LED_PIN=33, LED_COUNT=4. Simple color cues for state.
-• Drive: ESP32Servo on IO_PINS[], 90° = neutral/stop. API accepts percent [-100..100],
-  mapped to [0..180]. Left group = slots 1..6, Right group = slots 7..12.
-• Motor profiles: ConfigureMotorOutput() selects timing/pulse limits per device type.
+  REQUIRED BOARD PACKAGE
+  ------------------------------------------------------------------------------
+  In Arduino IDE:
+    File → Preferences → Additional Boards Manager URLs
+    Add:
+      https://dl.espressif.com/dl/package_esp32_index.json
 
+  Then:
+    Tools → Board → Boards Manager
+    Install:
+      "esp32" by Espressif Systems
+  
+  UI
+  ------------------------------------------------------------------------------
+    - SSID: "Minibot Web Interface" or change to as you see fit
+    - IP:   10.0.0.1 (static)
+    - AsyncWebServer + WebSocket (/ws) (libraries by ESP32Async)
+    - Joystick (x,y normalized [-1..1]) drives tank mix
+    - Buttons A/B/C/D send function events
+    - Telemetry pushed periodically:
+        vin, vin_raw, rssi_dbm, lag estimate handled client-side,
+        active-low buttons A/B/C/D + switch (external pullups),
+        uptime, cmd_age, stations, heap, system info.
+
+  SYSTEM OVERVIEW
+  ------------------------------------------------------------------------------
+  This firmware creates a standalone robot control system using:
+
+    1. ESP32 in Access Point mode
+    2. Browser-hosted control UI
+    3. WebSocket-based real-time command + telemetry link
+    4. Servo-style output control for motors / actuators
+    5. LED state feedback
+    6. Telemetry and fail-safe stopping logic
 
 ================================================================================
 */
 
-#include "soc/soc.h"           // Kept from original for brownout register access
-#include "soc/rtc_cntl_reg.h"  //   "
-#include "esp_http_server.h"
-#include <ESPmDNS.h>
+#include <Arduino.h>
 #include <WiFi.h>
-#include <esp_system.h>
 #include <esp_wifi.h>
+#include <ESPAsyncWebServer.h>
+#include <AsyncTCP.h>
+#include <ESP32Servo.h>
+#include <FastLED.h>
+#include "index_html.h"
 
-#include <ESP32Servo.h>     // Servo-based motor layer (replaces H-bridge PWM)
-#include <FastLED.h>        // LED layer (replaces Adafruit_NeoPixel)
+// ------------------------------
+// VERSION
+// ------------------------------
+static const char *FW_VERSION = "LoR Core V3 Web Interface FW - APRIL 2026";
 
-// -----------------------------------------------------------------------------
-// Version string (printed at boot)
-// -----------------------------------------------------------------------------
-String Version = "LoR Core Web Interface (Merged) - AUG 27, 2025";
+// ------------------------------
+// Wi-Fi AP config (static 10.0.0.1)
+// ------------------------------
+static const char *AP_SSID = "Minibot Web Interface DB"; // CHANGE TO YOUR NAME OF CHOICE
+static const char *AP_PASS = "password";
 
-// -----------------------------------------------------------------------------
-// === User-configurable parameters ===
-// -----------------------------------------------------------------------------
-const String ssid     = "MiniBot_v3";   // AP SSID
-const String password = "password";     // AP password (≥8 chars)
+IPAddress AP_IP(10, 0, 0, 1);
+IPAddress AP_GW(10, 0, 0, 1);
+IPAddress AP_SN(255, 255, 255, 0);
 
-// Drive speed presets. UI toggles between Low/High.
-int highSpeed  = 90;                    // percent of full-scale
-int lowSpeed   = 60;
-int driveSpeed = lowSpeed;              // current selection
+// ------------------------------
+// LoR Core V3 pins
+// ------------------------------
+const uint8_t AUX_PINS[9] = { 0, 5, 18, 23, 19, 22, 21, 1, 3 };
+const uint8_t IO_PINS[13] = { 0, 32, 25, 26, 27, 14, 12, 13, 15, 2, 4, 22, 21 };
 
-// -----------------------------------------------------------------------------
-// === LoR Core V3 pinout fragments (IO/AUX/User inputs/LED) ===
-// - Slots are 1-indexed in IO_PINS for readability against docs
-// -----------------------------------------------------------------------------
-const uint8_t AUX_PINS[9] = { 0, 5, 18, 23, 19, 22, 21, 1, 3 };       // [1..8]
-const uint8_t IO_PINS[13] = { 0, 32,25,26,27,14,12,13,15, 2, 4,22,21 };// [1..12]
-
-// User inputs (not used in handlers yet; available for expansion)
+// ------------------------------
+// User inputs (active-low with external pull-ups)
+// ------------------------------
 #define User_BTN_A 35
 #define User_BTN_B 39
 #define User_BTN_C 38
 #define User_BTN_D 37
-#define User_SW    36
+#define User_SW 36
 
-// VIN sense (unused here; scale retained)
-#define VIN_SENSE   34
-#define VOLT_SLOPE  0.0063492
+// ------------------------------
+// VIN sense
+// ------------------------------
+#define VIN_SENSE 34
+#define VOLT_SLOPE 0.0063492
 #define VOLT_OFFSET 1.079
 
-// ---- LED (FastLED) ----
-#define LED_PIN     33
-#define LED_COUNT   4
-#define BRIGHTNESS  255
+// ------------------------------
+// LEDs
+// ------------------------------
+#define LED_PIN 33
+#define LED_COUNT 4
+#define BRIGHTNESS 255
 #define COLOR_ORDER GRB
-#define CHIPSET     WS2812B
+#define CHIPSET WS2812B
 CRGB leds[LED_COUNT];
 
-// -----------------------------------------------------------------------------
-// === Motor model (ESP32Servo) — 90° = stop/neutral ===
-// -----------------------------------------------------------------------------
-Servo MotorOutput[13];  // index 1..12 are valid slots
+// ------------------------------
+// Serial debug state
+// ------------------------------
+static const uint32_t DEBUG_PRINT_PERIOD_MS = 200;
+static uint32_t g_lastDebugPrintMs = 0;
 
-// Motor profiles for attach() timing and range
+static float g_dbgJoyX = 0.0f;
+static float g_dbgJoyY = 0.0f;
+static bool g_dbgJoyDirty = false;
+
+static char g_dbgLastWebBtn = 0;
+static bool g_dbgWebBtnDirty = false;
+
+static uint8_t g_dbgBtnA = 1;
+static uint8_t g_dbgBtnB = 1;
+static uint8_t g_dbgBtnC = 1;
+static uint8_t g_dbgBtnD = 1;
+static uint8_t g_dbgSw = 1;
+static bool g_dbgInputsDirty = true;
+
+// ------------------------------
+// Motor layer (Servo)
+// ------------------------------
+Servo MotorOutput[13];
+
 enum MotorType {
-  MG90_CR, MG90_Degree, N20Plus, STD_SERVO, Victor_SPX, Talon_SRX, CUSTOM
+  MG90_CR,
+  MG90_Degree,
+  N20Plus,
+  STD_SERVO,
+  Victor_SPX,
+  Talon_SRX,
+  CUSTOM
 };
 
 struct MotorTypeConfig {
   MotorType type;
-  float     pwmFreq;     // Hz
-  int       minPulseUs;  // µs
-  int       maxPulseUs;  // µs
-  float     inputMin;    // reserved
-  float     inputMax;    // reserved
+  float pwmFreq;
+  int minPulseUs;
+  int maxPulseUs;
 };
 
-// Tunable presets (adjust for your hardware if needed)
 MotorTypeConfig motorTypeConfigs[] = {
-  { MG90_CR,     50,  500, 2500, -1, 1 },
-  { MG90_Degree, 50,  500, 2500,  1,180},
-  { N20Plus,     50, 1000, 2000, -1, 1 },
-  { Victor_SPX,  50, 1000, 2000, -1, 1 },
-  { Talon_SRX,   50, 1000, 2000, -1, 1 },
-  { STD_SERVO,   50, 1000, 2000,  0,180},
+  { MG90_CR, 50, 500, 2500 },
+  { MG90_Degree, 50, 500, 2500 },
+  { N20Plus, 50, 1000, 2000 },
+  { Victor_SPX, 50, 1000, 2000 },
+  { Talon_SRX, 50, 1000, 2000 },
+  { STD_SERVO, 50, 1000, 2000 },
 };
 
-// Attach a slot to a motor profile and set a startup angle
+static inline int pctToServoAngle_(int pct) {
+  pct = constrain(pct, -100, 100);
+  long ang = map(pct, -100, 100, 0, 180);
+  return (int)constrain(ang, 0, 180);
+}
+
 void ConfigureMotorOutput(uint8_t slot, MotorType motorType, int startupPositionDeg = 90) {
-  float pwmFreq   = 50;
-  int   minPulseUs= 1000;
-  int   maxPulseUs= 2000;
+  float pwmFreq = 50;
+  int minPulseUs = 1000;
+  int maxPulseUs = 2000;
 
   for (auto &cfg : motorTypeConfigs) {
     if (cfg.type == motorType) {
-      pwmFreq    = cfg.pwmFreq;
+      pwmFreq = cfg.pwmFreq;
       minPulseUs = cfg.minPulseUs;
       maxPulseUs = cfg.maxPulseUs;
       break;
@@ -137,307 +231,552 @@ void ConfigureMotorOutput(uint8_t slot, MotorType motorType, int startupPosition
 
   const uint8_t pin = IO_PINS[slot];
   pinMode(pin, OUTPUT);
-  MotorOutput[slot].setPeriodHertz(pwmFreq);
+  MotorOutput[slot].setPeriodHertz((int)pwmFreq);
   MotorOutput[slot].attach(pin, minPulseUs, maxPulseUs);
-  MotorOutput[slot].write(startupPositionDeg);  // neutral by default
-}
-
-// -----------------------------------------------------------------------------
-// === LED helpers (simple color cues) ===
-// -----------------------------------------------------------------------------
-inline void LED_SetSolid(uint8_t r, uint8_t g, uint8_t b) {
-  fill_solid(leds, LED_COUNT, CRGB(r,g,b));
-  FastLED.show();
-}
-inline void LED_Red()    { LED_SetSolid(255,  0,  0); }  // error/stop/serving UI
-inline void LED_Green()  { LED_SetSolid(  0,255,  0); }  // command received
-inline void LED_Blue()   { LED_SetSolid(  0,  0,255); }  // booting
-inline void LED_White()  { LED_SetSolid(255,255,255); }  // ready
-inline void LED_Yellow() { LED_SetSolid(255,255,  0); }  // low speed selected
-inline void LED_Cyan()   { LED_SetSolid(  0,255,255); }  // function A..D
-inline void LED_Purple() { LED_SetSolid(255,  0,255); }  // high speed selected
-inline void LED_Off()    { LED_SetSolid(  0,  0,  0); }
-
-// -----------------------------------------------------------------------------
-// === Drive layer (tank mix) ===
-// Left group = slots 1..6, Right group = slots 7..12
-// Input in percent [-100..+100] → angle [0..180], 90 = stop
-// -----------------------------------------------------------------------------
-static inline int percentToServoAngle(int pct) {
-  pct = constrain(pct, -100, 100);
-  const long ang = map(pct, -100, 100, 0, 180);
-  return (int)constrain(ang, 0, 180);
+  MotorOutput[slot].write(startupPositionDeg);
 }
 
 void Left_Group_Write(int pct) {
-  const int angle = percentToServoAngle(pct);
+  const int angle = pctToServoAngle_(pct);
   for (int s = 1; s <= 6; ++s) MotorOutput[s].write(angle);
 }
 
 void Right_Group_Write(int pct) {
-  const int angle = percentToServoAngle(pct);
+  const int angle = pctToServoAngle_(pct);
   for (int s = 7; s <= 12; ++s) MotorOutput[s].write(angle);
 }
 
-void Motor_Control(int LeftPct, int RightPct) {
-  Left_Group_Write(LeftPct);
-  Right_Group_Write(RightPct);
+void Motor_Control(int leftPct, int rightPct) {
+  Left_Group_Write(leftPct);
+  Right_Group_Write(rightPct);
 }
 
 void Motor_STOP() {
-  for (int s = 1; s <= 12; ++s) MotorOutput[s].write(90); // neutral
+  for (int s = 1; s <= 12; ++s) MotorOutput[s].write(90);
 }
 
-// -----------------------------------------------------------------------------
-// === Command bindings (called by HTTP /action?go=...) ===
-// Semantics match original web foundation
-// -----------------------------------------------------------------------------
-void functionForward()  { Motor_Control( -driveSpeed, +driveSpeed ); }
-void functionBackward() { Motor_Control( +driveSpeed, -driveSpeed ); }
-void functionLeft()     { Motor_Control( -driveSpeed, -driveSpeed ); }
-void functionRight()    { Motor_Control( +driveSpeed, +driveSpeed ); }
-void functionStop()     { Motor_STOP(); }
+// ------------------------------
+// LED state manager
+// ------------------------------
+enum LedMode {
+  LEDM_BOOT,
+  LEDM_DISCONNECTED,  // alternating blue/white at 1 Hz
+  LEDM_IDLE,          // red
+  LEDM_COMMAND,       // green
+  LEDM_FUNCTION       // cyan
+};
 
-// User-extendable function hooks
-void functionA() { /* custom action */ }
-void functionB() { /* custom action */ }
-void functionC() { /* custom action */ }
-void functionD() { /* custom action */ }
+static volatile LedMode g_ledRequested = LEDM_BOOT;
+static LedMode g_ledApplied = LEDM_BOOT;
 
-// -----------------------------------------------------------------------------
-// === Embedded Web Page (served at "/") ===
-// -----------------------------------------------------------------------------
-static const char PROGMEM INDEX_HTML[] = R"rawliteral(
-<html>
-  <head>
-    <title>LORD of ROBOTS</title>
-    <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1.0, user-scalable=no">
-    <style>
-      body { text-align:center; margin:0 auto; padding-top:30px; background-color:#001336; }
-      h1 { font-family:Monospace; color:white; margin:10px auto 30px; }
-      h3 { font-family:Monospace; color:#b3c1db; margin-bottom:10px; font-style:italic; }
-      .button {
-        background-color:#b3c1db; width:110px; height:75px; color:#001336; font-size:20px; font-weight:bold;
-        text-align:center; border-radius:5px; border:3px solid; border-color:white; display:inline-block;
-        margin:6px 6px; cursor:pointer; -webkit-tap-highlight-color:rgba(0,0,0,0);
-        -webkit-user-select:none; -moz-user-select:none; -ms-user-select:none; user-select:none;
-      }
-      .button:active { background-color:#001336; color:#ccd6e7; border:3px solid white; }
-      .slider {
-        position:relative; display:inline-block; -webkit-tap-highlight-color:transparent; vertical-align:top;
-        cursor:pointer; width:100px; height:40px; border-radius:50px; background-color:#001336; border:3px solid white;
-      }
-      .slider:before {
-        position:absolute; content:"Low"; font-style:italic; font-size:14px; font-weight:bold; color:#001336;
-        line-height:30px; vertical-align:middle; border-radius:50px; height:30px; width:50px; left:5px; bottom:5px;
-        background-color:#ccd6e7; -webkit-transition:.4s; transition:.4s;
-      }
-      .switch input { opacity:0; width:0; height:0; }
-      input:checked+.slider:before { content:'High'; transform:translateX(40px); }
-      #buttons { display:inline-block; text-align:center; }
-      .emptySpace { width:50px; height:10px; display:inline-block; margin:6px 6px; }
-    </style>
-  </head>
-  <body oncontextmenu="return false;">
-    <h3>LORD of ROBOTS</h3>
-    <h1>MiniBot Control Interface</h1>
-    <div id="buttons" style="margin-bottom:20px;">
-      <div class="emptySpace" style="width:110px"></div>
-      <div class="emptySpace" style="width:110px"></div>
-      <div class="emptySpace" style="color:white; width:110px; vertical-align:top; text-align:center; margin-bottom:15px;">Drive Speed</div>
-      <br>
-      <div class="emptySpace" style="width:105px"></div>
-      <button class="button" onpointerdown="sendData('forward')" onpointerup="releaseData()" id="forward-button">Forward</button>
-      <label class="switch">
-        <input type="checkbox" id="toggle-switch"><span class="slider"></span>
-      </label><br>
-      <button class="button" onpointerdown="sendData('left')" onpointerup="releaseData()" id="left-button">Left</button>
-      <button class="button" onpointerdown="sendData('stop')" onpointerup="releaseData()" id="stop-button">Stop</button>
-      <button class="button" onpointerdown="sendData('right')" onpointerup="releaseData()" id="right-button">Right</button><br>
-      <button class="button" onpointerdown="sendData('backward')" onpointerup="releaseData()" id="backward-button">Back</button>
-    </div>
-    <div class="emptySpace" style="width:150px; height:30px"></div>
-    <div id="buttons" style="vertical-align:50px">
-      <button class="button" onpointerdown="sendData('functionA')" onpointerup="releaseData()" id="functionA">A</button>
-      <button class="button" onpointerdown="sendData('functionB')" onpointerup="releaseData()" id="functionB">B</button><br>
-      <button class="button" onpointerdown="sendData('functionC')" onpointerup="releaseData()" id="functionC">C</button>
-      <button class="button" onpointerdown="sendData('functionD')" onpointerup="releaseData()" id="functionD">D</button>
-    </div>
-    <script>
-      // Simple AJAX helpers: send a command and auto-stop on release
-      var isButtonPressed = false;
-      function sendData(x){ var xhr=new XMLHttpRequest(); xhr.open("GET","/action?go="+x,true); xhr.send(); }
-      function releaseData(){ isButtonPressed=false; sendData('stop'); }
+static uint32_t g_ledFnHoldUntilMs = 0;
+static const uint32_t LED_FN_HOLD_MS = 200;
 
-      // Keyboard map for desktop control
-      const keyMap = {
-        'ArrowUp':'forward','ArrowLeft':'left','ArrowDown':'backward','ArrowRight':'right',
-        'KeyW':'forward','KeyA':'left','KeyS':'backward','KeyD':'right',
-        'KeyL':'low','KeyH':'high','Digit1':'functionA','Digit2':'functionB','Digit3':'functionC','Digit4':'functionD',
-        'Numpad1':'functionA','Numpad2':'functionB','Numpad3':'functionC','Numpad4':'functionD',
-      };
-
-      // Prevent repeat spamming; one down → one command
-      document.addEventListener('keydown', e=>{
-        if(!isButtonPressed){ const a=keyMap[e.code]; if(a) sendData(a); isButtonPressed=true; }
-      });
-      document.addEventListener('keyup', e=>{ releaseData(); });
-
-      // Speed toggle → low/high
-      const toggleSwitch=document.getElementById("toggle-switch");
-      toggleSwitch.addEventListener("change", function(){ sendData(toggleSwitch.checked?'high':'low'); });
-    </script>
-  </body>
-</html>
-)rawliteral";
-
-// -----------------------------------------------------------------------------
-// === HTTP Server handlers ===
-// -----------------------------------------------------------------------------
-httpd_handle_t Robot_httpd = NULL;
-
-// GET "/" → serve UI. Red LED while serving page payload.
-static esp_err_t index_handler(httpd_req_t *req) {
-  httpd_resp_set_type(req, "text/html");
-  LED_Red();
-  return httpd_resp_send(req, (const char *)INDEX_HTML, strlen(INDEX_HTML));
+inline void LED_SetSolid_(uint8_t r, uint8_t g, uint8_t b) {
+  fill_solid(leds, LED_COUNT, CRGB(r, g, b));
+  FastLED.show();
 }
 
-// GET "/action?go=CMD" → parse and execute command
-String speed = "low";
-static esp_err_t cmd_handler(httpd_req_t *req) {
-  char buf[128];
-  char variable[32] = {0};
-
-  // Parse query string: expect key "go"
-  if (httpd_req_get_url_query_str(req, buf, sizeof(buf)) != ESP_OK ||
-      httpd_query_key_value(buf, "go", variable, sizeof(variable)) != ESP_OK) {
-    httpd_resp_send_404(req);
-    return ESP_FAIL;
-  }
-
-  int res = 0;
-  LED_Green();  // indicate command activity
-
-  // Command decoder
-  if (!strcmp(variable, "high")) {
-    Serial.println("High Speed");
-    driveSpeed = highSpeed; speed = "High"; LED_Purple();
-  } else if (!strcmp(variable, "low")) {
-    Serial.println("Low Speed");
-    driveSpeed = lowSpeed;  speed = "Low";  LED_Yellow();
-  } else if (!strcmp(variable, "forward")) {
-    Serial.println("Forward " + speed); functionForward();
-  } else if (!strcmp(variable, "left")) {
-    Serial.println("Left " + speed);    functionLeft();
-  } else if (!strcmp(variable, "right")) {
-    Serial.println("Right " + speed);   functionRight();
-  } else if (!strcmp(variable, "backward")) {
-    Serial.println("Backward " + speed);functionBackward();
-  } else if (!strcmp(variable, "stop")) {
-    Serial.println("Stop"); functionStop(); LED_Red();
-  } else if (!strcmp(variable, "functionA")) {
-    Serial.println("Function A"); LED_Cyan(); functionA();
-  } else if (!strcmp(variable, "functionB")) {
-    Serial.println("Function B"); LED_Cyan(); functionB();
-  } else if (!strcmp(variable, "functionC")) {
-    Serial.println("Function C"); LED_Cyan(); functionC();
-  } else if (!strcmp(variable, "functionD")) {
-    Serial.println("Function D"); LED_Cyan(); functionD();
+inline void LED_SetDisconnectedPattern_(bool phase) {
+  if (!phase) {
+    leds[0] = CRGB(0, 0, 255);      // LED 1 blue
+    leds[1] = CRGB(255, 255, 255);  // LED 2 white
+    leds[2] = CRGB(0, 0, 255);      // LED 3 blue
+    leds[3] = CRGB(255, 255, 255);  // LED 4 white
   } else {
-    // Unknown command → fail safe to STOP
-    Serial.println("Stop (unknown cmd)");
-    LED_Red(); Motor_STOP(); res = -1;
+    leds[0] = CRGB(255, 255, 255);  // LED 1 white
+    leds[1] = CRGB(0, 0, 255);      // LED 2 blue
+    leds[2] = CRGB(255, 255, 255);  // LED 3 white
+    leds[3] = CRGB(0, 0, 255);      // LED 4 blue
   }
-
-  if (res) return httpd_resp_send_500(req);
-  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-  return httpd_resp_send(req, NULL, 0);  // 200 OK, empty body
+  FastLED.show();
 }
 
-// Start the embedded HTTP server and register routes
-void startServer() {
-  httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-  config.server_port = 80;
-  config.stack_size  = 8192;
-
-  httpd_uri_t index_uri = { .uri="/",       .method=HTTP_GET, .handler=index_handler, .user_ctx=NULL };
-  httpd_uri_t cmd_uri   = { .uri="/action", .method=HTTP_GET, .handler=cmd_handler,   .user_ctx=NULL };
-
-  if (httpd_start(&Robot_httpd, &config) == ESP_OK) {
-    httpd_register_uri_handler(Robot_httpd, &index_uri);
-    httpd_register_uri_handler(Robot_httpd, &cmd_uri);
-  }
-  // Bump ports in config object copy (mirrors IDF template behavior)
-  config.server_port += 1;
-  config.ctrl_port   += 1;
+inline void LED_Boot() {
+  g_ledRequested = LEDM_BOOT;
 }
 
-// -----------------------------------------------------------------------------
-// === Wi-Fi AP setup (static IP 10.0.0.1) ===
-// -----------------------------------------------------------------------------
-IPAddress local_ip(10,0,0,1), gateway(10,0,0,1), subnet(255,255,255,0);
+inline void LED_Ready() {
+  g_ledRequested = LEDM_DISCONNECTED;  // alternating blue/white disconnected pattern
+}
 
-void WifiSetup() {
+inline void LED_Cmd() {
+  g_ledRequested = LEDM_COMMAND;  // green
+}
+
+inline void LED_Stop() {
+  g_ledRequested = LEDM_IDLE;  // red
+}
+
+inline void LED_Fn() {
+  g_ledRequested = LEDM_FUNCTION;  // cyan
+  g_ledFnHoldUntilMs = millis() + LED_FN_HOLD_MS;
+}
+
+void serviceLed_() {
+  const uint32_t now = millis();
+
+  LedMode desired = g_ledRequested;
+
+  // Cyan overrides everything for at least 200 ms
+  if ((int32_t)(g_ledFnHoldUntilMs - now) > 0) {
+    desired = LEDM_FUNCTION;
+  }
+
+  // Special handling for disconnected animation:
+  // alternate every 500 ms = full 1 Hz swap cycle
+  if (desired == LEDM_DISCONNECTED) {
+    static bool lastPhase = false;
+    const bool phase = ((now / 500) & 0x1) != 0;
+
+    if (g_ledApplied != LEDM_DISCONNECTED || phase != lastPhase) {
+      LED_SetDisconnectedPattern_(phase);
+      g_ledApplied = LEDM_DISCONNECTED;
+      lastPhase = phase;
+    }
+    return;
+  }
+
+  if (desired == g_ledApplied) return;
+
+  switch (desired) {
+    case LEDM_BOOT: LED_SetSolid_(0, 0, 255); break;
+    case LEDM_DISCONNECTED: break;  // handled above
+    case LEDM_IDLE: LED_SetSolid_(255, 0, 0); break;
+    case LEDM_COMMAND: LED_SetSolid_(0, 255, 0); break;
+    case LEDM_FUNCTION: LED_SetSolid_(0, 255, 255); break;
+    default: break;
+  }
+
+  g_ledApplied = desired;
+}
+
+// ------------------------------
+// Web server + WebSocket
+// ------------------------------
+AsyncWebServer server(80);
+AsyncWebSocket ws("/ws");
+
+// ------------------------------
+// Control state
+// ------------------------------
+static volatile float g_joyX = 0.0f;
+static volatile float g_joyY = 0.0f;
+static volatile uint32_t g_lastCmdMs = 0;
+
+static const int DRIVE_MAX_PCT = 90;
+static const float DEADZONE = 0.06f;
+
+static const uint32_t JOY_RX_TIMEOUT_MS = 150;
+static const float JOY_ZERO_EPS = 0.02f;
+
+static inline float clampf_(float v, float lo, float hi) {
+  return (v < lo) ? lo : (v > hi) ? hi
+                                  : v;
+}
+
+static inline float applyDeadzone_(float v) {
+  if (fabsf(v) < DEADZONE) return 0.0f;
+  float s = (fabsf(v) - DEADZONE) / (1.0f - DEADZONE);
+  return copysignf(s, v);
+}
+
+static inline bool joyIsZero_(float x, float y) {
+  return (fabsf(x) <= JOY_ZERO_EPS) && (fabsf(y) <= JOY_ZERO_EPS);
+}
+
+void DriveFromJoystick(float x, float y) {
+  x = clampf_(x, -1.0f, 1.0f);
+  y = clampf_(y, -1.0f, 1.0f);
+
+  x = applyDeadzone_(x);
+  y = applyDeadzone_(y);
+
+  float left = y + x;
+  float right = y - x;
+
+  float m = max(fabsf(left), fabsf(right));
+  if (m > 1.0f) {
+    left /= m;
+    right /= m;
+  }
+
+  int leftPct = (int)roundf(left * DRIVE_MAX_PCT);
+  int rightPct = (int)roundf(right * DRIVE_MAX_PCT);
+
+  Motor_Control(-leftPct, +rightPct);
+}
+
+void serviceDriveFromLatestJoy_() {
+  const uint32_t now = millis();
+  const float x = g_joyX;
+  const float y = g_joyY;
+
+  if (g_lastCmdMs == 0 || (now - g_lastCmdMs) > JOY_RX_TIMEOUT_MS) {
+    Motor_STOP();
+    LED_Stop();
+    return;
+  }
+
+  if (joyIsZero_(x, y)) {
+    Motor_STOP();
+    LED_Stop();
+    return;
+  }
+
+  DriveFromJoystick(x, y);
+  LED_Cmd();
+}
+
+// ------------------------------
+// Function hooks (A/B/C/D)
+// ------------------------------
+void functionA() {}
+void functionB() {}
+void functionC() {}
+void functionD() {}
+
+// ------------------------------
+// Telemetry
+// ------------------------------
+static uint32_t g_lastTelPushMs = 0;
+static const uint32_t TEL_PERIOD_MS = 50;
+
+static inline uint16_t readVinRaw_() {
+  return (uint16_t)analogRead(VIN_SENSE);
+}
+
+static inline float readVinVolts_() {
+  const uint16_t raw = readVinRaw_();
+  return (raw * VOLT_SLOPE) + VOLT_OFFSET;
+}
+
+static inline uint8_t readActiveLow_(uint8_t pin) {
+  return (digitalRead(pin) == LOW) ? 0 : 1;
+}
+
+static inline int rssiDbm_() {
+  wifi_sta_list_t stationList;
+  if (esp_wifi_ap_get_sta_list(&stationList) != ESP_OK) return -127;
+  if (stationList.num == 0) return -127;
+  return stationList.sta[0].rssi;
+}
+
+static inline uint8_t stationCount_() {
+  wifi_sta_list_t stationList;
+  if (esp_wifi_ap_get_sta_list(&stationList) != ESP_OK) return 0;
+  return (uint8_t)stationList.num;
+}
+
+static inline uint32_t heapFree_() {
+  return (uint32_t)ESP.getFreeHeap();
+}
+
+static inline uint32_t heapMin_() {
+  return (uint32_t)ESP.getMinFreeHeap();
+}
+
+static inline uint32_t cpuMhz_() {
+  return (uint32_t)getCpuFrequencyMhz();
+}
+
+static inline uint32_t flashMb_() {
+  return (uint32_t)(ESP.getFlashChipSize() / (1024UL * 1024UL));
+}
+
+static inline const char *resetReasonShort_() {
+  esp_reset_reason_t r = esp_reset_reason();
+  switch (r) {
+    case ESP_RST_POWERON: return "PWR";
+    case ESP_RST_SW: return "SW";
+    case ESP_RST_PANIC: return "PANIC";
+    case ESP_RST_INT_WDT: return "WDT";
+    case ESP_RST_TASK_WDT: return "WDT";
+    case ESP_RST_BROWNOUT: return "BROWN";
+    case ESP_RST_DEEPSLEEP: return "SLEEP";
+    default: return "UNK";
+  }
+}
+
+void pushTelemetry_() {
+  const float vin = readVinVolts_();
+  const uint16_t vinRaw = readVinRaw_();
+
+  const uint32_t now = millis();
+  const uint32_t cmdAge = (g_lastCmdMs == 0) ? 0 : (now - g_lastCmdMs);
+
+  const uint8_t bA = readActiveLow_(User_BTN_A);
+  const uint8_t bB = readActiveLow_(User_BTN_B);
+  const uint8_t bC = readActiveLow_(User_BTN_C);
+  const uint8_t bD = readActiveLow_(User_BTN_D);
+  const uint8_t sw = readActiveLow_(User_SW);
+
+  char out[512];
+  snprintf(out, sizeof(out),
+           "{\"type\":\"tel\","
+           "\"vin\":%.3f,"
+           "\"vin_raw\":%u,"
+           "\"rssi_dbm\":%d,"
+           "\"btnA\":%u,\"btnB\":%u,\"btnC\":%u,\"btnD\":%u,\"sw\":%u,"
+           "\"uptime_ms\":%lu,"
+           "\"cmd_age_ms\":%lu,"
+           "\"stations\":%u,"
+           "\"heap_free\":%lu,"
+           "\"heap_min\":%lu,"
+           "\"cpu_mhz\":%lu,"
+           "\"flash_mb\":%lu,"
+           "\"reset\":\"%s\""
+           "}",
+           vin,
+           (unsigned)vinRaw,
+           rssiDbm_(),
+           (unsigned)bA, (unsigned)bB, (unsigned)bC, (unsigned)bD, (unsigned)sw,
+           (unsigned long)now,
+           (unsigned long)cmdAge,
+           (unsigned)stationCount_(),
+           (unsigned long)heapFree_(),
+           (unsigned long)heapMin_(),
+           (unsigned long)cpuMhz_(),
+           (unsigned long)flashMb_(),
+           resetReasonShort_());
+
+  ws.textAll(out);
+}
+
+// ------------------------------
+// WebSocket message handling
+// ------------------------------
+static bool parseJoy_(const String &s, float &x, float &y) {
+  int ix = s.indexOf("\"x\":");
+  int iy = s.indexOf("\"y\":");
+  if (ix < 0 || iy < 0) return false;
+
+  x = s.substring(ix + 4).toFloat();
+  y = s.substring(iy + 4).toFloat();
+  x = clampf_(x, -1.0f, 1.0f);
+  y = clampf_(y, -1.0f, 1.0f);
+  return true;
+}
+
+static char parseFn_(const String &s) {
+  int ii = s.indexOf("\"id\"");
+  if (ii < 0) return 0;
+  int q1 = s.indexOf('"', ii + 4);
+  if (q1 < 0) return 0;
+  int q2 = s.indexOf('"', q1 + 1);
+  if (q2 < 0) return 0;
+  if (q2 == q1 + 1) return 0;
+  char c = s.charAt(q1 + 1);
+  return c;
+}
+
+static inline bool changedF_(float a, float b, float eps = 0.01f) {
+  return fabsf(a - b) > eps;
+}
+
+void debugMarkJoy_(float x, float y) {
+  if (changedF_(g_dbgJoyX, x) || changedF_(g_dbgJoyY, y)) {
+    g_dbgJoyX = x;
+    g_dbgJoyY = y;
+    g_dbgJoyDirty = true;
+  }
+}
+
+void debugMarkWebBtn_(char id) {
+  if (g_dbgLastWebBtn != id) {
+    g_dbgLastWebBtn = id;
+  }
+  g_dbgWebBtnDirty = true;
+}
+
+void debugPollInputs_() {
+  const uint8_t a = readActiveLow_(User_BTN_A);
+  const uint8_t b = readActiveLow_(User_BTN_B);
+  const uint8_t c = readActiveLow_(User_BTN_C);
+  const uint8_t d = readActiveLow_(User_BTN_D);
+  const uint8_t sw = readActiveLow_(User_SW);
+
+  if (a != g_dbgBtnA || b != g_dbgBtnB || c != g_dbgBtnC || d != g_dbgBtnD || sw != g_dbgSw) {
+    g_dbgBtnA = a;
+    g_dbgBtnB = b;
+    g_dbgBtnC = c;
+    g_dbgBtnD = d;
+    g_dbgSw = sw;
+    g_dbgInputsDirty = true;
+  }
+}
+
+void debugPrintIfNeeded_() {
+  const uint32_t now = millis();
+  if ((now - g_lastDebugPrintMs) < DEBUG_PRINT_PERIOD_MS) return;
+
+  const bool anythingDirty = g_dbgJoyDirty || g_dbgWebBtnDirty || g_dbgInputsDirty;
+  if (!anythingDirty) return;
+
+  g_lastDebugPrintMs = now;
+
+  if (g_dbgJoyDirty) {
+    Serial.printf("WEB JOY  x=%.2f y=%.2f\n", g_dbgJoyX, g_dbgJoyY);
+    g_dbgJoyDirty = false;
+  }
+
+  if (g_dbgWebBtnDirty) {
+    Serial.printf("WEB BTN  %c\n", g_dbgLastWebBtn ? g_dbgLastWebBtn : '-');
+    g_dbgWebBtnDirty = false;
+  }
+
+  if (g_dbgInputsDirty) {
+    Serial.printf("CORE IN  A=%u B=%u C=%u D=%u SW=%u\n",
+                  g_dbgBtnA, g_dbgBtnB, g_dbgBtnC, g_dbgBtnD, g_dbgSw);
+    g_dbgInputsDirty = false;
+  }
+}
+
+void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
+               AwsEventType type, void *arg, uint8_t *data, size_t len) {
+  if (type == WS_EVT_CONNECT) {
+    g_joyX = 0.0f;
+    g_joyY = 0.0f;
+    g_lastCmdMs = 0;
+    Motor_STOP();
+    LED_Stop();
+    return;
+  }
+
+  if (type == WS_EVT_DISCONNECT) {
+    g_joyX = 0.0f;
+    g_joyY = 0.0f;
+    g_lastCmdMs = 0;
+    Motor_STOP();
+    LED_Ready();
+    return;
+  }
+
+  if (type != WS_EVT_DATA) return;
+
+  AwsFrameInfo *info = (AwsFrameInfo *)arg;
+  if (!info->final || info->index != 0 || info->len != len) return;
+  if (info->opcode != WS_TEXT) return;
+
+  String msg;
+  msg.reserve(len + 1);
+  for (size_t i = 0; i < len; i++) msg += (char)data[i];
+
+  if (msg.indexOf("\"type\":\"joy\"") >= 0) {
+    float x, y;
+    if (parseJoy_(msg, x, y)) {
+      g_joyX = x;
+      g_joyY = y;
+      g_lastCmdMs = millis();
+      debugMarkJoy_(x, y);
+    }
+    return;
+  }
+
+  if (msg.indexOf("\"type\":\"fn\"") >= 0) {
+    char id = parseFn_(msg);
+    g_lastCmdMs = millis();
+    debugMarkWebBtn_(id);
+    LED_Fn();
+    switch (id) {
+      case 'A': functionA(); break;
+      case 'B': functionB(); break;
+      case 'C': functionC(); break;
+      case 'D': functionD(); break;
+      default: break;
+    }
+    return;
+  }
+}
+
+// ------------------------------
+// Wi-Fi AP setup
+// ------------------------------
+void wifiStartAP_() {
   WiFi.mode(WIFI_AP);
+  WiFi.softAPConfig(AP_IP, AP_GW, AP_SN);
+  WiFi.softAP(AP_SSID, AP_PASS);
 
-  // Configure AP IP BEFORE starting the AP
-  WiFi.softAPConfig(local_ip, gateway, subnet);
-
-  // Start AP with SSID/PASS (channel/hidden/max_conn optional)
-  WiFi.softAP(ssid.c_str(), password.c_str());
-
-  // Print assigned AP IP
-  Serial.print("AP IP: ");
-  Serial.println(WiFi.softAPIP()); // expected 10.0.0.1
-
-  // mDNS (optional): http://robot.local
-  if (!MDNS.begin("robot")) Serial.println("Error setting up MDNS responder!");
-  MDNS.addService("http", "tcp", 80);
-
-  Serial.println("WiFi start");
+  Serial.print("AP SSID: ");
+  Serial.println(AP_SSID);
+  Serial.print("AP IP:   ");
+  Serial.println(WiFi.softAPIP());
 }
 
-// -----------------------------------------------------------------------------
-// === setup() — initialize peripherals, network, and server ===
-// -----------------------------------------------------------------------------
-void setup() {
-  // Disable brownout detector (matches original foundation behavior)
-  WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
+// ------------------------------
+// Server routes
+// ------------------------------
+void serverStart_() {
+  ws.onEvent(onWsEvent);
+  server.addHandler(&ws);
 
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send_P(200, "text/html", INDEX_HTML);
+  });
+
+  server.on("/health", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(200, "text/plain", "ok");
+  });
+
+  server.begin();
+  Serial.println("HTTP server started");
+}
+
+// ------------------------------
+// Setup
+// ------------------------------
+void setup() {
   Serial.begin(115200);
   delay(200);
-  Serial.println("Serial Begin");
+  Serial.println();
+  Serial.println(FW_VERSION);
 
-  // Configure inputs (available for future features)
   pinMode(User_BTN_A, INPUT);
   pinMode(User_BTN_B, INPUT);
   pinMode(User_BTN_C, INPUT);
   pinMode(User_BTN_D, INPUT);
-  pinMode(User_SW,    INPUT);
-  pinMode(VIN_SENSE,  INPUT);
+  pinMode(User_SW, INPUT);
 
-  // LEDs
+  analogReadResolution(12);
+  pinMode(VIN_SENSE, INPUT);
+
   FastLED.addLeds<CHIPSET, LED_PIN, COLOR_ORDER>(leds, LED_COUNT);
   FastLED.setBrightness(BRIGHTNESS);
-  LED_Blue();  // boot indicator
+  LED_Ready();
+  serviceLed_();
 
-  // Attach all motor slots to profiles; adjust per-mechatronics as needed
-  Serial.println("Motors Startup");
-  for (int s = 1; s <= 11; ++s) ConfigureMotorOutput(s, N20Plus, 90);
+  Serial.println("Motors init...");
+  for (int s = 1; s <= 11; ++s) ConfigureMotorOutput(s, MG90_CR, 90);
   ConfigureMotorOutput(12, MG90_CR, 90);
+  Motor_STOP();
 
-  // Network + HTTP
-  WifiSetup();
-  startServer();
+  wifiStartAP_();
+  serverStart_();
 
-  LED_White();
-  Serial.println("MiniBot System Ready! Version = " + Version);
+  LED_Ready();
+  serviceLed_();
+
+  Serial.println("Ready.");
 }
 
-// -----------------------------------------------------------------------------
-// === loop() — event-driven via HTTP; idle here ===
-// -----------------------------------------------------------------------------
+// ------------------------------
+// Main loop
+// ------------------------------
 void loop() {
-  // No periodic work required. HTTP handlers perform all actions.
+  ws.cleanupClients();
+
+  const uint32_t now = millis();
+
+  debugPollInputs_();
+
+  serviceDriveFromLatestJoy_();
+
+  if (now - g_lastTelPushMs >= TEL_PERIOD_MS) {
+    g_lastTelPushMs = now;
+    pushTelemetry_();
+  }
+
+  debugPrintIfNeeded_();
+
+  serviceLed_();
 }
