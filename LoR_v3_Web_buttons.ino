@@ -119,7 +119,7 @@ static const char *FW_VERSION = "LoR Core V3 Web Interface FW - APRIL 2026";
 // ------------------------------
 // Wi-Fi AP config (static 10.0.0.1)
 // ------------------------------
-static const char *AP_SSID = "Minibot Web Interface DB"; // CHANGE TO YOUR NAME OF CHOICE
+static const char *AP_SSID = "Minibot Web Interface DB";  // CHANGE TO YOUR NAME OF CHOICE
 static const char *AP_PASS = "password";
 
 IPAddress AP_IP(10, 0, 0, 1);
@@ -238,12 +238,12 @@ void ConfigureMotorOutput(uint8_t slot, MotorType motorType, int startupPosition
 
 void Left_Group_Write(int pct) {
   const int angle = pctToServoAngle_(pct);
-  for (int s = 1; s <= 6; ++s) MotorOutput[s].write(angle);
+  for (int s = 7; s <= 12; ++s) MotorOutput[s].write(angle);
 }
 
 void Right_Group_Write(int pct) {
   const int angle = pctToServoAngle_(pct);
-  for (int s = 7; s <= 12; ++s) MotorOutput[s].write(angle);
+  for (int s = 1; s <= 6; ++s) MotorOutput[s].write(angle);
 }
 
 void Motor_Control(int leftPct, int rightPct) {
