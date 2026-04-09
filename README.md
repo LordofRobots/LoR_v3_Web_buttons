@@ -22,7 +22,7 @@ The ESP32 creates its own Wi-Fi network, hosts a web page, and communicates with
 ---
 
 ## Environment Setup
- insure to download BOTH the LoR_v3_Web_buttons.ino and the INDEX_HTML.h files. These files are both required to be in the same folder and opened in arduino to upload code run the robot.
+ Ensure to download BOTH the LoR_v3_Web_buttons.ino and the INDEX_HTML.h files. These files are both required to be in the same folder and opened in arduino to upload code run the robot.
  
 ### Arduino IDE Libraries
 
