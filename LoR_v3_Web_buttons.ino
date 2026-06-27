@@ -412,7 +412,7 @@ void DriveFromJoystick(float x, float y) {
 void serviceDriveFromLatestJoy_() {
   const uint32_t now = millis();
   const float x = -g_joyX; //inverted if MG90_CR
-  const float y = -g_joyY; //inverted if MG90_CR
+  const float y = g_joyY; //inverted if MG90_CR
 
   // PRIORITY: if no WebSocket clients are attached, show disconnected pattern
   if (ws.count() == 0) {
